@@ -29,7 +29,12 @@ SBO_MANAGEMENT_VERSION=0.9
 # local or remote
 BUILD_SYSTEM=local
 
-source ~/slackbuilds.conf
+if [ -f /usr/local/etc/slackbuilds.conf ]; then
+  source /usr/local/etc/slackbuilds.conf
+fi
+if [ -f ~/.local/slackbuilds.conf ]; then
+  source ~/.local/slackbuilds.conf
+fi
 
 # System compilation version
 SLACKWARE_LOCAL_VERSION=$(cat /etc/slackware-version)
@@ -38,15 +43,22 @@ PACKAGE=${pulseaudio:-$2}
 
 TMP=${TMP:-~/Public/SBo-slackbuilds/$SLACKWARE_VERSION}
 
+# sanity check
+[ $(which sudo) ] || exit
 
-#red='\033[0;31m'
-#NC='\033[0m' # No Color
-#echo -e "${red}Hello Stackoverflow${NC}"
+if [ ! -z "$ARCH" ]; then
+  case "$ARCH" in
+    i?86) ARCH=x86; SLACKNAME="" ;;
+    arm*) ARCH=arm; SLACKNAME"arm";;
+    x86_64) ARCH=x86_64; SLACKNAME="64";;
+     *) echo "invalid architecture: $ARCH"; exit ;;
+  esac
+fi
 
 if [ -z "$SBo_MIRROR" ]; then
   SBo_MIRROR="rsync://slackbuilds.org/slackbuilds"
   echo "No local mirror defined mirror,
-        using $SBo_MIRROR"
+        using $SBo_MIRROR"; sleep 0.5
   sleep 2
 fi
 
@@ -62,6 +74,7 @@ echo "# Slackware version: $SLACKWARE_VERSION"
 echo "# /etc/slackware-version: $SLACKWARE_LOCAL_VERSION"
 echo "###############"###############
 
+HLINE="------------------------------------------"
 function update_slackbuilds() {
   echo "### Updating Slackbuild's source"
   if [ ! -f $TMP/SLACKBUILDS.TXT.old ];then
@@ -75,17 +88,23 @@ function update_slackbuilds() {
      echo $NEWPKGS
 }
 
+function dialog_info_pkg {
+  INFO=$(info_package ${PKG_LIST[$PACKAGE]}) 
+
+  dialog --title "${PKG_LIST[$PACKAGE]}" --scrollbar --msgbox "'$INFO'" 14 60
+}
+
 function display_packages {
 	searchfor=$1
-	SEARCH=$(zgrep -i "$searchfor" SLACKBUILDS.TXT.gz | sed -n -e 's/SLACKBUILD NAME: //p')
+	SEARCH=$(zgrep -i "$searchfor" $TMP/SLACKBUILDS.TXT.gz | sed -n -e 's/SLACKBUILD NAME: //p')
 
 	PKG_LIST=( $SEARCH )
 
 	if [ ${#PKG_LIST[@]} == 0 ]; then
 	  echo "No packages found for: $searchfor"
-	  exit 0
+	  return 1
 	else
-	  echo "Packages found for $searchfor: ${#PKG_LIST[@]}"
+	  echo "Packages found for $searchfor: ${#PKG_LIST[@]}"; sleep 1
 	fi
 
     	npkg=0;
@@ -95,10 +114,31 @@ function display_packages {
 	    npkg=$(( $npkg + 1 ))
 	done
 	tempfile=`tempfile 2>/dev/null` || tempfile=/tmp/sb_management-tmp$$
-        dialog --backtitle "Slackbuilds for $SLACKWARE_VERSION" --menu "Choose a package:" 15 45 5 ${menu_list[@]} 2> $tempfile
-	PACKAGE=$(cat $tempfile)
+        dialog --backtitle "Slackbuilds for $SLACKWARE_VERSION" \
+		--nocancel --help-button --help-label info --help-status \
+		--extra-button --extra-label install \
+		--menu "Choose a package:" 15 45 5 ${menu_list[@]} 2> $tempfile
 
-     	get_package ${PKG_LIST[$PACKAGE]}
+	case $? in
+		0)
+	   PACKAGE=$(cat $tempfile)
+	   PACKAGE=${PKG_LIST[$PACKAGE]}
+	   ;;
+   2)
+	   PACKAGE=$(cat $tempfile | cut -b6-)
+	   if [ ! -z "$DIALOGON" ]; then
+	     dialog_info_pkg;
+	     $0 search $searchfor
+	   else
+	     info_package ${PKG_LIST[$PACKAGE]}
+	   fi
+	   ;;
+   3)
+	   PACKAGE=$(cat $tempfile)
+	   sh $0 install ${PKG_LIST[$PACKAGE]}
+	   ;;
+	   esac
+#	fi
 }
 
 function search_package() {
@@ -109,11 +149,11 @@ function search_package() {
       exit
     fi
 
-    DESCRIPTION=$(zgrep -i "$searchfor" SLACKBUILDS.TXT.gz | sed -n -e 's/^.*DESCRIPTION: //p')
-    NAME=$(zgrep -i "$searchfor" SLACKBUILDS.TXT.gz | sed -n -e 's/^.*NAME: //p')
+    NAME=$(zgrep -i "$searchfor" $TMP/SLACKBUILDS.TXT.gz | sed -n -e 's/^.*NAME: //p')
     NAME=( $NAME )
 
     if [ "${#NAME[@]}" == "1" ]; then
+      DESCRIPTION=$(zgrep -i "$searchfor" $TMP/SLACKBUILDS.TXT.gz | sed -n -e 's/^.*DESCRIPTION: //p')
       echo "$(tput bold) $NAME $(tput sgr0) - $DESCRIPTION"
     elif [ "${#NAME[@]}" == "0" ]; then
       echo "No packages found for: $searchfor"
@@ -124,22 +164,25 @@ function search_package() {
 }
 
 function info_package() {
-    DESCRIPTION=$(zgrep -A 10 "SLACKBUILD NAME: $PACKAGE" SLACKBUILDS.TXT.gz | grep "DESCRIPTION:" | sed -n -e 's/^.*DESCRIPTION: //p')
-    DOWNLOAD=$(zgrep -A 11 "SLACKBUILD NAME: $PACKAGE" SLACKBUILDS.TXT.gz | grep "DOWNLOAD" | sed -n -e 's/^.*: //p')
-
-    echo "$(tput bold) Description:"
-    echo "$(tput sgr0) $DESCRIPTION"
-
-    echo "$(tput bold) Download file(s):"
-    for f in $DOWNLOAD
-    do
-	echo "$(tput sgr0)  $f"
+    PACKAGE=$1
+    for pkg in $PACKAGE; do
+      get_package $pkg #|| break
     done
-  
-    echo "$(tput bold) Additional required package(s):"
-    echo "$(tput sgr0) $(check_dependence)"
-
-    tput sgr0
+    if [ ! -z "$NAME" ]; then
+      echo "$HLINE"
+      echo "Name: $NAME"
+      echo "Description: $DESCRIPTION"
+      echo "Location: $LOCATION"
+      echo "Source file(s):"
+      for f in $DOWNLOAD; do
+        echo "$(tput sgr0) $f"
+      done
+      PACKAGE=$NAME
+      check_dependence
+      check_prepar
+      echo "$HLINE"
+      tput sgr0
+    fi
 }
 
 # Check for required packages
@@ -152,7 +195,7 @@ function check_dependence() {
 #remote duplicated
   REQUIRES=$(echo $REQUIRES | xargs -n1 | sort -u | xargs)
   README=$(echo $REQUIRES | sed 's/*README*//') # Remove README files 
-  [ ! -z $README ]; echo "Attention for README"; sleep 1
+  [ ! -z "$README" ]; echo "Attention for README"; sleep 1
 
   if [ ! "$REQUIRES" ]; then
 	  echo "### No additional requires found"
@@ -164,16 +207,16 @@ function check_dependence() {
 }
 
 function get_package() {
+  searchfor="$1"
 
-searchfor="$1"
+  SEARCH=$(zgrep -x -A 12  "SLACKBUILD NAME:* $searchfor" SLACKBUILDS.TXT.gz)
+  SEARCH=$(echo "$SEARCH" | sed -e '/^$/,$d')
 
-SEARCH=$(zgrep -x -A 12  "SLACKBUILD NAME:* $searchfor" SLACKBUILDS.TXT.gz)
-SEARCH=$(echo "$SEARCH" | sed -e '/^$/,$d')
-
-if [ ! "$SEARCH" ]; then
+  if [ ! "$SEARCH" ]; then
     echo "No packages found for: $searchfor"
+    echo "try slackbuild-management.sh search $searchfor"
     break;
-else
+  else
     NAME=$(echo "$SEARCH" | sed -n -e 's/^.*NAME: //p')
     LOCATION=$(echo "$SEARCH" | sed -n -e 's/^.*LOCATION: //p')
     VERSION=$(echo "$SEARCH" | sed -n -e 's/^.*VERSION: //p')
@@ -184,8 +227,8 @@ else
     echo "Description: $DESCRIPTION"
     echo "Location: $LOCATION"
     echo "Source downloads: $DOWNLOAD"
-fi
-PACKAGE=$NAME
+  fi
+  PACKAGE=$NAME
 }
 
 function check_prepar() {
@@ -209,43 +252,40 @@ function check_prepar() {
 	  fi
   fi
   echo "------------------------------------------"
-  sleep 6
+  sleep 2
 }
 
 
 function download_package() {
-get_package $1
-SB_SOURCE="$SBo_MIRROR/$SLACKWARE_VERSION/${LOCATION}"
+  get_package $1
+  SB_SOURCE="$SBo_MIRROR/$SLACKWARE_VERSION/${LOCATION}"
 
-if [ ! -d "$TMP/$LOCATION" ]; then mkdir -p $LOCATION; fi
-cd $TMP/$LOCATION
+  if [ ! -d "$TMP/$LOCATION" ]; then mkdir -p $LOCATION; fi
+  cd $TMP/$LOCATION
 
-echo "Slackbuilds mirror: $SB_SOURCE"
+  echo "Slackbuilds mirror: $SB_SOURCE"
 
-if [ -z "$LOCATION" ]; then
-  echo "Unable to locate SlackBuild for $1"
-else
-  echo "### Slackbuild's source: $SB_SOURCE"
-  rsync -aPSH $SB_SOURCE/ $TMP/$LOCATION
-fi
+  if [ -z "$LOCATION" ]; then
+    echo "Unable to locate SlackBuild for $1"
+  else
+    echo "### Slackbuild's source: $SB_SOURCE"
+    rsync -aPSH $SB_SOURCE/ $TMP/$LOCATION
+  fi
 
-
-
-if [ -z $TMP/${LOCATION}/${NAME}/README ]; then
-  cat $TMP/${LOCATION}/${NAME}/README
-fi
+  if [ -f $TMP/${LOCATION}/${NAME}/README ]; then
+    cat $TMP/${LOCATION}/${NAME}/README
+    sleep 3
+  fi
 
 # check for source downloads
 if [ -z "$DOWNLOAD" ]; then
   for f in $DOWNLOAD
   do
-	echo "wget -c -p -O ~/Downloads/SBo/$(basename $f) $f"
+    echo "wget -c -p -O ~/Downloads/SBo/$(basename $f) $f"
   done
 fi
 cd -
 }
-
-
 
 
 function download_temp() {
@@ -282,13 +322,11 @@ echo "Source archs found: ${#DOWNLOAD_ARCH[@]}"
   # default selection
   DOWNLOAD=$(zgrep -i -A 11 "SLACKBUILD NAME: $PACKAGE" SLACKBUILDS.TXT.gz | grep "DOWNLOAD" | sed -n -e 's/^.*: //p')
   DOWNLOAD=( $DOWNLOAD )
-echo $SCREEN - ${NAME[$SCREEN]} - $DOWNLOAD
-link[$i]="$DOWNLOAD"
-
+  echo $SCREEN - ${NAME[$SCREEN]} - $DOWNLOAD
+  link[$i]="$DOWNLOAD"
 
   fi
-  
-  
+
   SB_SOURCE="$SBo_MIRROR/$SLACKWARE_VERSION/${LOCATION[$SCREEN]}"
 
   for slink in $DOWNLOAD
@@ -356,8 +394,8 @@ function build_package() {
 function pack_package() {
 
   if [ -z "$1" ];then
-	echo "unknown package"
-	exit 1
+    echo "Unknown package"
+    exit 1
   fi
 
   PACKAGE=$1
@@ -516,8 +554,18 @@ case $1 in
       install_slackbuilds $2
       exit
     ;;    
+    reinstall)
+      AUTO=yes pack_package $2
+      AUTO=yes install_slackbuilds $2
+      exit
+    ;;
     info)
-      info_package $2 
+      args=("$@")
+      c=1
+      while [ "$c" -lt "$#" ]; do
+        info_package "${args[$c]}"
+        (( c++ ))
+      done
       exit
     ;;
     update)
@@ -525,9 +573,8 @@ case $1 in
       exit
     ;;
     *)
-      echo "Unkwon option: $1"
-      echo "Try $0: search|download|pack|info|update"
-      echo "Sorry, no help for now"
+      echo "Unknown option: $1"
+      echo "Try: $0 search|info|download|download-sources|pack|install|update"
       exit
     ;;
 esac
